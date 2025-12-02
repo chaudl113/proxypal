@@ -22,6 +22,8 @@ const providerColors: Record<string, string> = {
     "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400",
   antigravity:
     "bg-pink-100 text-pink-700 dark:bg-pink-900/30 dark:text-pink-400",
+  deepseek: "bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-400",
+  pending: "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-500",
   unknown: "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-400",
 };
 

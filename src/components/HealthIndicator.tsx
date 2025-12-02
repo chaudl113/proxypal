@@ -55,12 +55,21 @@ export function HealthIndicator(props: HealthIndicatorProps) {
   };
 
   // Check health on mount and when proxy status changes
+  // Throttle to once per 60 seconds to avoid spamming /v1/models
   createEffect(() => {
     if (proxyStatus().running) {
-      checkHealth();
-      // Check every 30 seconds
-      const interval = setInterval(checkHealth, 30000);
-      onCleanup(() => clearInterval(interval));
+      // Delay initial check to stagger requests from multiple instances
+      const initialDelay = Math.random() * 5000; // 0-5 second random delay
+      const timeout = setTimeout(() => {
+        checkHealth();
+      }, initialDelay);
+
+      // Check every 60 seconds (reduced from 30 to cut spam)
+      const interval = setInterval(checkHealth, 60000);
+      onCleanup(() => {
+        clearTimeout(timeout);
+        clearInterval(interval);
+      });
     } else {
       setHealth({ status: "offline", lastChecked: Date.now() / 1000 });
     }
@@ -108,7 +117,8 @@ export function HealthPanel() {
   createEffect(() => {
     if (proxyStatus().running) {
       checkHealth();
-      const interval = setInterval(checkHealth, 30000);
+      // Check every 60 seconds (reduced from 30 to cut spam)
+      const interval = setInterval(checkHealth, 60000);
       onCleanup(() => clearInterval(interval));
     }
   });

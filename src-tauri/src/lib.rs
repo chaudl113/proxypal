@@ -264,107 +264,53 @@ fn save_auth_to_file(auth: &AuthStatus) -> Result<(), String> {
 }
 
 // Parse CLIProxyAPI log output to extract request information
+// CLIProxyAPI uses GIN framework log format:
+// [GIN] 2025/12/02 - 14:30:57 | 200 | 1.5s | ::1 | POST "/v1/chat/completions"
 fn parse_request_log(line: &str, counter: &mut u64) -> Option<RequestLog> {
-    // CLIProxyAPI outputs logs in various formats:
-    // - "2024/01/01 12:00:00 POST /v1/chat/completions 200 123ms model=gpt-4"
-    // - "[INFO] POST /v1/chat/completions -> 200 (123ms)"
-    // - JSON: {"method": "POST", "path": "/v1/...", "status": 200, "duration": 123, "model": "..."}
-    // - "model=gpt-5-codex provider=openai tokens=1234"
-    
     let line_trimmed = line.trim();
     
-    // First, try to parse as JSON (CLIProxyAPI may output structured logs)
-    if line_trimmed.starts_with('{') && line_trimmed.ends_with('}') {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line_trimmed) {
-            let method = json.get("method").and_then(|v| v.as_str()).unwrap_or("POST");
-            let path = json.get("path").and_then(|v| v.as_str()).unwrap_or("/v1/chat/completions");
-            let status = json.get("status").and_then(|v| v.as_u64()).unwrap_or(200) as u16;
-            let duration = json.get("duration").or(json.get("duration_ms")).and_then(|v| v.as_u64()).unwrap_or(0);
-            let model = json.get("model").and_then(|v| v.as_str()).unwrap_or("auto");
-            let provider = json.get("provider").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let tokens_in = json.get("input_tokens").or(json.get("tokens_in")).and_then(|v| v.as_u64()).map(|v| v as u32);
-            let tokens_out = json.get("output_tokens").or(json.get("tokens_out")).and_then(|v| v.as_u64()).map(|v| v as u32);
-            
-            *counter += 1;
-            return Some(RequestLog {
-                id: format!("req_{}", counter),
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64,
-                provider: provider.to_string(),
-                model: model.to_string(),
-                method: method.to_string(),
-                path: path.to_string(),
-                status,
-                duration_ms: duration,
-                tokens_in,
-                tokens_out,
-            });
-        }
-    }
-    
-    // Must contain an HTTP method AND a valid API path to be a request log
-    // NOTE: Exclude /v1/models as it's used for health checks
-    let has_method = line_trimmed.contains("POST") || line_trimmed.contains("GET") || 
-                     line_trimmed.contains("PUT") || line_trimmed.contains("DELETE");
-    let has_api_path = line_trimmed.contains("/v1/chat/completions") || 
-                       line_trimmed.contains("/v1/messages") ||
-                       line_trimmed.contains("/v1/completions");
-    
-    // Skip lines that don't look like HTTP request logs
-    if !has_method || !has_api_path {
+    // Must be a GIN log line with an API path we care about
+    // Skip /v1/models (health checks) and /v0/management/* (internal)
+    if !line_trimmed.contains("[GIN]") {
         return None;
     }
     
-    // Skip startup/info messages that might contain these substrings
-    let line_lower = line_trimmed.to_lowercase();
-    if line_lower.contains("listening") || line_lower.contains("starting") || 
-       line_lower.contains("loaded") || line_lower.contains("config") ||
-       line_lower.contains("error:") || line_lower.contains("warn:") {
+    // Only track actual AI API calls, not health checks or management endpoints
+    let is_chat = line_trimmed.contains("/v1/chat/completions");
+    let is_messages = line_trimmed.contains("/v1/messages");
+    let is_completions = line_trimmed.contains("/v1/completions") && !is_chat;
+    
+    if !is_chat && !is_messages && !is_completions {
         return None;
     }
     
-    // Extract HTTP method
-    let method = if line_trimmed.contains("POST") {
+    // Extract HTTP method from the log
+    let method = if line_trimmed.contains(" POST ") || line_trimmed.contains("POST \"") {
         "POST"
-    } else if line_trimmed.contains("GET") {
+    } else if line_trimmed.contains(" GET ") || line_trimmed.contains("GET \"") {
         "GET"
-    } else if line_trimmed.contains("PUT") {
-        "PUT"
-    } else if line_trimmed.contains("DELETE") {
-        "DELETE"
     } else {
-        "POST"
+        "POST" // Default for chat completions
     };
     
     // Extract path
-    let path = if line_trimmed.contains("/v1/chat/completions") {
+    let path = if is_chat {
         "/v1/chat/completions"
-    } else if line_trimmed.contains("/v1/messages") {
+    } else if is_messages {
         "/v1/messages"
-    } else if line_trimmed.contains("/v1/completions") {
-        "/v1/completions"
     } else {
-        "/v1/chat/completions"
+        "/v1/completions"
     };
     
-    // Try to extract model name from log line
-    // Look for patterns like: model=xxx, "model":"xxx", model: xxx
-    let model = extract_model_name(line_trimmed).unwrap_or_else(|| "auto".to_string());
-    
-    // Try to identify provider from model names or keywords in the log
-    let provider = detect_provider(line_trimmed, &model);
-    
-    // Extract status code - look for 3-digit codes
+    // Extract status code from GIN format: "| 200 |"
     let status = extract_status_code(line_trimmed).unwrap_or(200);
     
-    // Extract duration if present
+    // Extract duration from GIN format: "| 1.5s |" or "| 150ms |"
     let duration_ms = extract_duration(line_trimmed).unwrap_or(0);
     
-    // Try to extract token counts
-    let tokens_in = extract_token_count(line_trimmed, "input").or_else(|| extract_token_count(line_trimmed, "in"));
-    let tokens_out = extract_token_count(line_trimmed, "output").or_else(|| extract_token_count(line_trimmed, "out"));
+    // CLIProxyAPI stdout doesn't include model/provider/tokens
+    // Those are only available from Management API /v0/management/usage
+    // We'll show "pending" and let the UI fetch details from Management API
     
     *counter += 1;
     
@@ -374,138 +320,24 @@ fn parse_request_log(line: &str, counter: &mut u64) -> Option<RequestLog> {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64,
-        provider: provider.to_string(),
-        model,
+        provider: "pending".to_string(), // Will be enriched by Management API
+        model: "pending".to_string(),    // Will be enriched by Management API
         method: method.to_string(),
         path: path.to_string(),
         status,
         duration_ms,
-        tokens_in,
-        tokens_out,
+        tokens_in: None,  // Will be enriched by Management API
+        tokens_out: None, // Will be enriched by Management API
     })
 }
 
-// Extract model name from log line
-fn extract_model_name(line: &str) -> Option<String> {
-    // Try various patterns for model name extraction
-    let patterns = [
-        // model=gpt-5-codex
-        r"model[=:][\s]*([^\s,\]}\)]+)",
-        // "model": "gpt-5-codex"
-        r#""model"[\s]*:[\s]*"([^"]+)""#,
-    ];
-    
-    for pattern in patterns {
-        if let Ok(re) = regex::Regex::new(pattern) {
-            if let Some(caps) = re.captures(line) {
-                if let Some(model) = caps.get(1) {
-                    let model_str = model.as_str().to_string();
-                    if !model_str.is_empty() && model_str != "auto" {
-                        return Some(model_str);
-                    }
-                }
-            }
-        }
-    }
-    
-    // Try to find common model names directly in the line
-    let known_models = [
-        "claude-sonnet-4-5-20250929", "claude-opus-4-1-20250805", "claude-3-5-haiku-20241022",
-        "gpt-5", "gpt-5-codex", "gpt-4o", "gpt-4", "o3", "o1",
-        "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-pro",
-        "qwen3-coder-plus", "qwen-coder-plus", "qwen2.5-coder",
-        "deepseek-r1", "deepseek-v3",
-    ];
-    
-    let line_lower = line.to_lowercase();
-    for model in known_models {
-        if line_lower.contains(&model.to_lowercase()) {
-            return Some(model.to_string());
-        }
-    }
-    
-    None
-}
-
-// Detect provider from log line and model name
-fn detect_provider(line: &str, model: &str) -> String {
-    let line_lower = line.to_lowercase();
-    let model_lower = model.to_lowercase();
-    
-    // Check model name first (most reliable)
-    if model_lower.contains("claude") || model_lower.contains("sonnet") || 
-       model_lower.contains("opus") || model_lower.contains("haiku") {
-        return "claude".to_string();
-    }
-    if model_lower.contains("gpt") || model_lower.contains("codex") || model_lower.starts_with("o3") || model_lower.starts_with("o1") {
-        return "openai".to_string();
-    }
-    if model_lower.contains("gemini") {
-        return "gemini".to_string();
-    }
-    if model_lower.contains("qwen") {
-        return "qwen".to_string();
-    }
-    if model_lower.contains("deepseek") {
-        return "deepseek".to_string();
-    }
-    
-    // Check log line for provider keywords
-    if line_lower.contains("anthropic") || line_lower.contains("[claude]") || line_lower.contains("-> claude") {
-        return "claude".to_string();
-    }
-    if line_lower.contains("openai") || line_lower.contains("[openai]") || line_lower.contains("[codex]") {
-        return "openai".to_string();
-    }
-    if line_lower.contains("google") || line_lower.contains("[gemini]") || line_lower.contains("-> gemini") {
-        return "gemini".to_string();
-    }
-    if line_lower.contains("[qwen]") || line_lower.contains("-> qwen") {
-        return "qwen".to_string();
-    }
-    if line_lower.contains("iflow") {
-        return "iflow".to_string();
-    }
-    if line_lower.contains("vertex") {
-        return "vertex".to_string();
-    }
-    if line_lower.contains("antigravity") {
-        return "antigravity".to_string();
-    }
-    
-    "unknown".to_string()
-}
-
-// Extract token count from log line
-fn extract_token_count(line: &str, token_type: &str) -> Option<u32> {
-    // Look for patterns like: input_tokens=123, tokens_in=123, input: 123
-    let patterns = [
-        format!(r"{}_tokens[=:][\s]*(\d+)", token_type),
-        format!(r"tokens_{}[=:][\s]*(\d+)", token_type),
-        format!(r#""{}_tokens"[\s]*:[\s]*(\d+)"#, token_type),
-    ];
-    
-    for pattern in patterns {
-        if let Ok(re) = regex::Regex::new(&pattern) {
-            if let Some(caps) = re.captures(line) {
-                if let Some(count) = caps.get(1) {
-                    if let Ok(n) = count.as_str().parse::<u32>() {
-                        return Some(n);
-                    }
-                }
-            }
-        }
-    }
-    
-    None
-}
-
-// Helper to extract HTTP status code from log line
+// Helper to extract HTTP status code from GIN log line
+// Format: "| 200 |"
 fn extract_status_code(line: &str) -> Option<u16> {
-    // Look for common status code patterns: " 200 ", " 200)", "->200", ":200"
-    for word in line.split(|c: char| c.is_whitespace() || c == ')' || c == '(' || c == ':' || c == '>') {
-        if let Ok(code) = word.parse::<u16>() {
-            // Valid HTTP status codes are 100-599
+    // GIN format uses pipes: "| 200 |"
+    for part in line.split('|') {
+        let trimmed = part.trim();
+        if let Ok(code) = trimmed.parse::<u16>() {
             if (100..600).contains(&code) {
                 return Some(code);
             }
@@ -514,16 +346,20 @@ fn extract_status_code(line: &str) -> Option<u16> {
     None
 }
 
-// Helper to extract duration from log line
+// Helper to extract duration from GIN log line
+// Format: "| 1.5s |" or "| 150ms |" or "| 0s |"
 fn extract_duration(line: &str) -> Option<u64> {
-    // Look for patterns like "123ms", "1.5s", "1500ms"
-    for word in line.split_whitespace() {
-        if word.ends_with("ms") {
-            if let Ok(ms) = word.trim_end_matches("ms").parse::<u64>() {
+    for part in line.split('|') {
+        let trimmed = part.trim();
+        // Check for milliseconds first
+        if trimmed.ends_with("ms") {
+            if let Ok(ms) = trimmed.trim_end_matches("ms").parse::<u64>() {
                 return Some(ms);
             }
-        } else if word.ends_with('s') && !word.ends_with("ms") {
-            if let Ok(secs) = word.trim_end_matches('s').parse::<f64>() {
+        }
+        // Check for seconds (including "0s")
+        if trimmed.ends_with('s') && !trimmed.ends_with("ms") {
+            if let Ok(secs) = trimmed.trim_end_matches('s').parse::<f64>() {
                 return Some((secs * 1000.0) as u64);
             }
         }
