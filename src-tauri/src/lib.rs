@@ -390,15 +390,20 @@ fn save_request_history(history: &RequestHistory) -> Result<(), String> {
 // Estimate cost based on model and tokens
 fn estimate_request_cost(model: &str, tokens_in: u32, tokens_out: u32) -> f64 {
     // Pricing per 1M tokens (input, output) - approximate as of 2024
+    // Using broader patterns to match all model versions (3.x, 4.x, 4.5, 5.x, etc.)
     let (input_rate, output_rate) = match model.to_lowercase().as_str() {
-        m if m.contains("claude-3-opus") => (15.0, 75.0),
-        m if m.contains("claude-3-sonnet") || m.contains("claude-3.5-sonnet") => (3.0, 15.0),
-        m if m.contains("claude-3-haiku") || m.contains("claude-3.5-haiku") => (0.25, 1.25),
+        // Claude models - broader patterns to match all versions (3.x, 4.x, 4.5, etc.)
+        m if m.contains("claude") && m.contains("opus") => (15.0, 75.0),
+        m if m.contains("claude") && m.contains("sonnet") => (3.0, 15.0),
+        m if m.contains("claude") && m.contains("haiku") => (0.25, 1.25),
+        // GPT models - check newer versions first
+        m if m.contains("gpt-5") => (15.0, 45.0), // GPT-5 estimated pricing
         m if m.contains("gpt-4o") => (2.5, 10.0),
         m if m.contains("gpt-4-turbo") || m.contains("gpt-4") => (10.0, 30.0),
         m if m.contains("gpt-3.5") => (0.5, 1.5),
-        m if m.contains("gemini-1.5-pro") => (1.25, 5.0),
-        m if m.contains("gemini-1.5-flash") => (0.075, 0.30),
+        // Gemini models - broader patterns for all 2.x versions
+        m if m.contains("gemini") && m.contains("pro") => (1.25, 5.0),
+        m if m.contains("gemini") && m.contains("flash") => (0.075, 0.30),
         m if m.contains("gemini-2") => (0.10, 0.40),
         m if m.contains("qwen") => (0.50, 2.0),
         _ => (1.0, 3.0), // Default conservative estimate
@@ -595,10 +600,10 @@ fn parse_gin_log_line(line: &str, request_counter: &AtomicU64) -> Option<Request
     }
     
     // Parse the GIN log format using regex
-    // Example: [GIN] 2025/12/04 - 20:51:48 | 200 | 6.656s | ::1 | POST "/api/provider/anthropic/v1/messages"
+    // Example: [GIN] 2025/12/04 - 20:51:48 | 200 | 6.656s | ::1 | POST "/api/provider/anthropic/v1/messages" | model=claude-3-opus
     lazy_static::lazy_static! {
         static ref GIN_REGEX: Regex = Regex::new(
-            r#"\[GIN\]\s+(\d{4}/\d{2}/\d{2})\s+-\s+(\d{2}:\d{2}:\d{2})\s+\|\s+(\d+)\s+\|\s+([^\s]+)\s+\|\s+[^\s]+\s+\|\s+(\w+)\s+"([^"]+)""#
+            r#"\[GIN\]\s+(\d{4}/\d{2}/\d{2})\s+-\s+(\d{2}:\d{2}:\d{2})\s+\|\s+(\d+)\s+\|\s+([^\s]+)\s+\|\s+[^\s]+\s+\|\s+(\w+)\s+"([^"]+)"(?:\s+\|\s+model=(\S+))?"#
         ).unwrap();
     }
     
@@ -631,9 +636,10 @@ fn parse_gin_log_line(line: &str, request_counter: &AtomicU64) -> Option<Request
         0
     };
     
-    // Extract model from path for Gemini, otherwise use endpoint type
-    // Note: For non-Gemini requests, model is in the request body which we can't access from logs
-    let model = extract_model_from_path(&path)
+    // Extract model from log line (group 7) or fall back to path extraction for Gemini
+    let model = captures.get(7)
+        .map(|m| m.as_str().to_string())
+        .or_else(|| extract_model_from_path(&path))
         .unwrap_or_else(|| "unknown".to_string());
     
     // Determine provider from path first, then fallback to model-based detection
@@ -641,9 +647,11 @@ fn parse_gin_log_line(line: &str, request_counter: &AtomicU64) -> Option<Request
         .unwrap_or_else(|| detect_provider_from_model(&model));
     
     let id = request_counter.fetch_add(1, Ordering::SeqCst);
+    // Use timestamp + counter for unique ID (survives app restarts)
+    let unique_id = format!("req_{}_{}", timestamp, id);
     
     Some(RequestLog {
-        id: format!("log_{}", id),
+        id: unique_id,
         timestamp,
         provider,
         model,
@@ -1986,8 +1994,11 @@ fn add_request_to_history(request: RequestLog) -> Result<RequestHistory, String>
     history.total_tokens_out += tokens_out as u64;
     history.total_cost_usd += cost;
     
-    // Add request
-    history.requests.push(request);
+    // Add request (with deduplication check)
+    // Check if request with same ID already exists to prevent duplicates
+    if !history.requests.iter().any(|r| r.id == request.id) {
+        history.requests.push(request);
+    }
     
     // Save
     save_request_history(&history)?;

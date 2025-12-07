@@ -19,6 +19,8 @@ import {
   detectCliAgents,
   getRequestHistory,
   getUsageStats,
+  syncUsageFromProxy,
+  onRequestLog,
   configureCliAgent,
   testAgentConnection,
   appendToShellProfile,
@@ -394,6 +396,17 @@ export function DashboardPage() {
     try {
       const hist = await getRequestHistory();
       setHistory(hist);
+
+      // Sync real token data from proxy if running
+      if (appStore.proxyStatus().running) {
+        try {
+          const synced = await syncUsageFromProxy();
+          setHistory(synced);
+        } catch (syncErr) {
+          console.warn("Failed to sync usage from proxy:", syncErr);
+          // Continue with disk-only history
+        }
+      }
     } catch (err) {
       console.error("Failed to load request history:", err);
     }
@@ -405,6 +418,34 @@ export function DashboardPage() {
     } catch (err) {
       console.error("Failed to load usage stats:", err);
     }
+
+    // Listen for new requests and refresh data
+    const unlisten = await onRequestLog(async () => {
+      // Debounce: wait 1 second after request to allow backend to process
+      setTimeout(async () => {
+        try {
+          const hist = await getRequestHistory();
+          setHistory(hist);
+
+          // Also sync from proxy if running
+          if (appStore.proxyStatus().running) {
+            const synced = await syncUsageFromProxy();
+            setHistory(synced);
+          }
+
+          // Refresh stats
+          const usage = await getUsageStats();
+          setStats(usage);
+        } catch (err) {
+          console.error("Failed to refresh after new request:", err);
+        }
+      }, 1000);
+    });
+
+    // Cleanup listener on unmount
+    onCleanup(() => {
+      unlisten();
+    });
   });
 
   // Setup complete when: proxy running + provider connected + agent configured
@@ -607,7 +648,13 @@ export function DashboardPage() {
   };
   const successRate = () => {
     const s = stats();
-    if (!s || s.totalRequests === 0) return 100;
+    if (!s || s.totalRequests === 0) {
+      // Fallback to history if stats unavailable
+      const total = history().requests.length;
+      if (total === 0) return 100;
+      const successes = history().requests.filter((r) => r.status < 400).length;
+      return Math.round((successes / total) * 100);
+    }
     return Math.round((s.successCount / s.totalRequests) * 100);
   };
 
@@ -916,9 +963,7 @@ export function DashboardPage() {
               />
               <KpiTile
                 label="Requests"
-                value={formatTokens(
-                  stats()?.totalRequests || history().requests.length,
-                )}
+                value={formatTokens(history().requests.length)}
                 subtext={`${stats()?.requestsToday || 0} today`}
                 icon="requests"
                 color="blue"
