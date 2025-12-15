@@ -3198,6 +3198,22 @@ export function SettingsPage() {
 											<p class="text-sm font-medium text-brand-700 dark:text-brand-300">
 												Update Available: v{updateInfo()?.version}
 											</p>
+											<p class="text-xs text-amber-600 dark:text-amber-400 mt-1 flex items-center gap-1">
+												<svg
+													class="w-3.5 h-3.5"
+													fill="none"
+													stroke="currentColor"
+													viewBox="0 0 24 24"
+												>
+													<path
+														stroke-linecap="round"
+														stroke-linejoin="round"
+														stroke-width="2"
+														d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+													/>
+												</svg>
+												Please stop the proxy before updating to avoid issues
+											</p>
 											<Show when={updateInfo()?.body}>
 												<p class="text-xs text-brand-600 dark:text-brand-400 mt-1 line-clamp-3">
 													{updateInfo()?.body}
@@ -3362,7 +3378,7 @@ export function SettingsPage() {
 								ProxyPal
 							</h3>
 							<p class="text-sm text-gray-500 dark:text-gray-400">
-								Version 0.1.47
+								Version 0.1.48
 							</p>
 							<p class="text-xs text-gray-400 dark:text-gray-500 mt-2">
 								Built with love by OpenCodeKit
